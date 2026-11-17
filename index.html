@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="fi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Rantalainen – Hinnantarkastustyökalu</title>
+<link rel="icon" href="data:,">
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+:root{box-sizing:border-box;color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);background:#f8fafc}
+body{background:#f8fafc;color:#0f172a;font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+@media print{header,nav,.noprint{display:none!important}}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+// OSKARIN TIETOMALLI (JSON)
+const DATA = {
+  products: [
+    { id: "M-01", name: "Kirjanpito (Perus)", category: "Core", billingType: "Jatkuva", billingUnit: "kk", unitPrice: 250.00, minPrice: 200.00, dependencies: [] },
+    { id: "M-02", name: "Tilinpäätös (Perus)", category: "Core", billingType: "Jatkuva", billingUnit: "kk", unitPrice: 50.00, minPrice: 40.00, dependencies: [] },
+    { id: "M-03", name: "Kirjanpito (Laaja)", category: "Core", billingType: "Jatkuva", billingUnit: "kk", unitPrice: 450.00, minPrice: 380.00, dependencies: [] },
+    { id: "M-04", name: "Palkanlaskenta", category: "Lisäpalvelu", billingType: "Jatkuva", billingUnit: "kpl", unitPrice: 4.50, minPrice: 3.50, dependencies: ["M-01", "M-03"] },
+    { id: "M-05", name: "Ostoreskontra", category: "Lisäpalvelu", billingType: "Jatkuva", billingUnit: "kpl", unitPrice: 0.85, minPrice: 0.70, dependencies: ["M-01", "M-03"] },
+    { id: "M-06", name: "HR-konsultointi", category: "Asiantuntijatyö", billingType: "Kertaluonteinen", billingUnit: "h", unitPrice: 120.00, minPrice: 100.00, dependencies: [] },
+    { id: "M-07", name: "Käyttöönottoprojekti", category: "Asiantuntijatyö", billingType: "Kertaluonteinen", billingUnit: "kpl", unitPrice: 500.00, minPrice: 500.00, dependencies: [] }
+  ],
+  packages: [
+    { id: "P-100", name: "Suppea Core", includedModules: ["M-01"], targetCustomer: "Pienyritys, vähän tositteita" },
+    { id: "P-200", name: "Perus Core", includedModules: ["M-01", "M-02"], targetCustomer: "Kasvava yritys, perus tarpeet" },
+    { id: "P-300", name: "Laaja Core", includedModules: ["M-03", "M-02"], targetCustomer: "Keskisuuri, vaatii laajaa seurantaa" }
+  ],
+  discounts: [
+    { id: "A-01", name: "Keskittäjäalennus (5%)", calculationType: "percentage", value: 5, targetScope: "total" },
+    { id: "A-02", name: "Sopimusasiakas Prosentti (10%)", calculationType: "percentage", value: 10, targetScope: "category:Asiantuntijatyö" },
+    { id: "A-03", name: "Kampanja: Uusi Asiakas (-50€)", calculationType: "fixed", value: 50.00, targetScope: "first_month_invoice" }
+  ]
+};
+
+const prod = id => DATA.products.find(p => p.id === id);
+const pkgOf = id => DATA.packages.find(p => p.id === id);
+const eur = n => n.toLocaleString("fi-FI", { style: "currency", currency: "EUR" });
+const STEPS = ["Tarvekartoitus", "Ydinpalvelu & Lisät", "Lisäpalvelut & Alennukset", "Yhteenveto & Sopimushinta"];
+
+const S = {
+  step: 1,
+  survey: { employees: 5, invoices: 120, locations: 1, reporting: "Laaja", payrollNeeded: true },
+  pkg: "P-200",
+  extras: {},
+  disc: { "A-01": true, "A-02": true },
+  customPrice: null
+};
+
+function applySurveyToPricing() {
+  const inv = Math.max(0, parseInt(S.survey.invoices) || 0);
+  const emp = Math.max(0, parseInt(S.survey.employees) || 0);
+
+  if (inv <= 100) S.pkg = "P-100";
+  else if (inv <= 500) S.pkg = "P-200";
+  else S.pkg = "P-300";
+
+  if (S.survey.payrollNeeded && emp > 0) {
+    S.extras["M-04"] = { qty: emp };
+  } else {
+    delete S.extras["M-04"];
+  }
+}
+
+function pkgBasePrice(id) {
+  return pkgOf(id).includedModules.reduce((sum, m) => sum + prod(m).unitPrice, 0);
+}
+
+function calc() {
+  const inv = Math.max(0, parseInt(S.survey.invoices) || 0);
+  const loc = Math.max(1, parseInt(S.survey.locations) || 1);
+
+  let complexitySum = 0;
+  const complexityDetails = [];
+
+  if (inv > 100) {
+    const extraBlocks = Math.ceil((inv - 100) / 100);
+    const cost = extraBlocks * 30.00;
+    complexitySum += cost;
+    complexityDetails.push({ name: `Lisätositteet (${inv} kpl, +${extraBlocks}x100 erää)`, price: cost });
+  }
+
+  if (loc > 1) {
+    const cost = (loc - 1) * 40.00;
+    complexitySum += cost;
+    complexityDetails.push({ name: `Lisätoimipaikat (${loc - 1} kpl)`, price: cost });
+  }
+
+  let addonSum = 0;
+  const addonDetails = [];
+  if (S.survey.reporting === "Laaja") {
+    addonSum += 30.00;
+    addonDetails.push({ name: "Laajempi johdon raportointi", price: 30.00 });
+  }
+
+  const pk = pkgOf(S.pkg);
+
+  const lines = [];
+  pk.includedModules.forEach(mid => {
+    const p = prod(mid);
+    lines.push({ label: p.name, list: p.unitPrice, cat: "Ydinpalvelu", type: p.billingType, origId: p.id, qty: 1, disc: 0 });
+  });
+
+  complexityDetails.forEach(c => {
+    lines.push({ label: c.name, list: c.price, cat: "Monimutkaisuus", type: "Jatkuva", qty: 1, disc: 0 });
+  });
+
+  addonDetails.forEach(a => {
+    lines.push({ label: a.name, list: a.price, cat: "Palvelulisä", type: "Jatkuva", qty: 1, disc: 0 });
+  });
+
+  for (const id in S.extras) {
+    const p = prod(id), q = S.extras[id].qty;
+    const hasQty = p.billingUnit !== "kk";
+    lines.push({ label: p.name + (hasQty ? ` (${q} ${p.billingUnit})` : ""), list: p.unitPrice * (hasQty ? q : 1), cat: p.category, type: p.billingType, origId: p.id, qty: hasQty ? q : 1, disc: 0 });
+  }
+
+  const subtotalMonthly = lines.filter(l => l.type === "Jatkuva").reduce((s, l) => s + l.list, 0);
+  const subtotalOnetime = lines.filter(l => l.type === "Kertaluonteinen").reduce((s, l) => s + l.list, 0);
+
+  let a02_monthly = 0, a02_onetime = 0, a01_monthly = 0, a03 = 0;
+
+  // Sopimusasiakasalennus (10 % asiantuntijatyöstä)
+  if (S.disc["A-02"]) {
+    lines.forEach(l => {
+      if (l.cat === "Asiantuntijatyö") {
+        l.disc = l.list * 0.10;
+        if (l.type === "Jatkuva") a02_monthly += l.disc;
+        if (l.type === "Kertaluonteinen") a02_onetime += l.disc;
+      }
+    });
+  }
+
+  // Keskittäjäalennus (5 % kuukausimaksusta A-02:n jälkeen)
+  if (S.disc["A-01"]) {
+    a01_monthly = (subtotalMonthly - a02_monthly) * 0.05;
+  }
+
+  const monthly = subtotalMonthly - a02_monthly - a01_monthly;
+  const onetime = subtotalOnetime - a02_onetime;
+
+  if (S.disc["A-03"]) {
+    a03 = Math.min(50.00, monthly);
+  }
+
+  const recommendedMonthly = monthly;
+  const finalMonthly = S.customPrice !== null ? S.customPrice : recommendedMonthly;
+
+  let warnings = [];
+  lines.forEach(l => {
+    if (l.origId) {
+      const p = prod(l.origId);
+      const unitP = (l.list - l.disc) / l.qty;
+      if (unitP < p.minPrice) {
+        warnings.push(`${p.name} yksikköhinta (${eur(unitP)}) alittaa hälytysrajan (${eur(p.minPrice)})`);
+      }
+    }
+  });
+
+  if (S.customPrice !== null && S.customPrice < recommendedMonthly) {
+    const diff = Math.round(((recommendedMonthly - S.customPrice) / recommendedMonthly) * 100);
+    warnings.push(`Sopimushinta alittaa suosituksen ${diff} % (${eur(recommendedMonthly - S.customPrice)} / kk alennus).`);
+  }
+
+  return { lines, subtotalMonthly, subtotalOnetime, a01_monthly, a02_monthly, a02_onetime, a03, monthly, onetime, recommendedMonthly, finalMonthly, warnings };
+}
+
+function header() {
+  return `<header class="bg-white border-b border-slate-200">
+  <div class="max-w-6xl mx-auto px-5 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-3"><div class="w-9 h-9 rounded-lg bg-[#0284c7] text-white font-bold flex items-center justify-center">R</div>
+    <div><div class="font-semibold leading-tight">Rantalainen Hinnantarkastus</div><div class="text-[10px] tracking-wide text-slate-500">MYYJÄN NÄKYMÄ</div></div></div>
+    <div class="text-right"><div class="text-sm font-semibold leading-tight">B2B Myyjä</div><div class="text-[10px] text-slate-500">Sisäinen työkalu</div></div>
+  </div>
+  <nav class="border-t border-slate-100"><ol class="max-w-6xl mx-auto px-5 py-3 flex items-center gap-3 overflow-x-auto text-sm">
+  ${STEPS.map((t, i) => {
+    const n = i + 1, done = n < S.step, cur = n === S.step;
+    const badge = done ? `<span class="w-7 h-7 rounded-full bg-green-100 text-green-700 flex items-center justify-center text-xs">✓</span>`
+      : cur ? `<span class="w-7 h-7 rounded-full bg-[#0284c7] text-white flex items-center justify-center text-xs font-semibold">${n}</span>`
+      : `<span class="w-7 h-7 rounded-full bg-slate-100 text-slate-600 flex items-center justify-center text-xs font-semibold">${n}</span>`;
+    return `<li class="flex items-center gap-2 shrink-0">
+      <button onclick="go(${n})" class="flex items-center gap-2 cursor-pointer hover:opacity-80 transition-opacity focus:outline-none">
+        ${badge}
+        <span class="${cur ? "text-[#0284c7] font-medium" : done ? "text-slate-700" : "text-slate-600"} whitespace-nowrap">${t}</span>
+      </button>
+      ${n < 4 ? `<span class="hidden md:block w-12 h-px ${done ? "bg-green-700" : "bg-slate-200"} ml-1"></span>` : ""}
+    </li>`;
+  }).join("")}
+  </ol></nav></header>`;
+}
+
+function summaryBox(final) {
+  const c = calc();
+  const row = (a, b, cls = "") => `<div class="flex justify-between text-sm py-0.5 ${cls}"><span class="text-slate-600">${a}</span><span class="font-semibold">${b}</span></div>`;
+  const next = final ? "" : `<button onclick="go(${S.step + 1})" class="w-full mt-4 rounded-md bg-[#0284c7] hover:bg-[#0369a1] text-white py-2.5 text-sm font-semibold">Jatka seuraavaan vaiheeseen →</button>
+    ${S.step > 1 ? `<button onclick="go(${S.step - 1})" class="w-full mt-2 rounded-md border border-slate-300 bg-white py-2 text-sm font-semibold hover:bg-slate-50">← Edellinen vaihe</button>` : ""}`;
+  
+  return `<aside id="sum" class="bg-white rounded-xl border border-slate-200 shadow-sm p-5 h-fit lg:sticky lg:top-4 flex flex-col gap-4">
+    <div>
+        <h3 class="font-semibold text-base border-b border-slate-100 pb-2 mb-2">Laskennallinen yhteenveto</h3>
+        ${row("Jatkuvat palvelut yhteensä", eur(c.subtotalMonthly))}
+        ${c.a02_monthly ? row("Sopimusasiakas (-10%)", "−" + eur(c.a02_monthly), "[&_span]:!text-red-700") : ""}
+        ${c.a01_monthly ? row("Keskittäjäalennus (-5%)", "−" + eur(c.a01_monthly), "[&_span]:!text-red-700") : ""}
+        <div class="mt-2 pt-2 border-t border-slate-100 flex items-baseline justify-between gap-2">
+          <span class="font-semibold text-sm">Suositeltu hinta</span>
+          <span class="text-xl font-bold text-[#0284c7]">${eur(c.recommendedMonthly)} / kk</span>
+        </div>
+    </div>
+    
+    ${c.subtotalOnetime > 0 ? `<div class="border-t border-slate-100 pt-3">
+        <h3 class="font-semibold text-sm mb-1">Kertaluonteiset palvelut</h3>
+        ${row("Välisumma", eur(c.subtotalOnetime))}
+        ${c.a02_onetime ? row("Sopimusasiakas (-10%)", "−" + eur(c.a02_onetime), "[&_span]:!text-red-700") : ""}
+        <div class="flex justify-between text-sm mt-1"><b>Kertamaksut yhteensä</b><b>${eur(c.onetime)}</b></div>
+    </div>` : ""}
+
+    ${c.a03 ? `<div class="rounded-md bg-green-50 text-green-800 text-xs px-3 py-2">
+        <div class="flex justify-between font-semibold"><span>Uusi Asiakas -kampanja</span><span>−50,00 €</span></div>
+        <div class="text-[11px] text-green-700 mt-0.5">Vähennetään 1. kuukauden laskulta</div>
+    </div>` : ""}
+
+    ${c.warnings.length > 0 ? `<div class="rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-xs px-3 py-2 space-y-1">
+        <div class="font-bold flex items-center gap-1">⚠️ Huomioita laskelmassa</div>
+        ${c.warnings.map(w => `<div>${w}</div>`).join('')}
+    </div>` : ""}
+    
+    ${next}</aside>`;
+}
+
+function updateSurveyCalculations() {
+  applySurveyToPricing();
+  const c = calc();
+  const pkg = pkgOf(S.pkg);
+
+  const nameEl = document.getElementById("rec-pkg-name");
+  const descEl = document.getElementById("rec-pkg-desc");
+  const priceEl = document.getElementById("rec-pkg-price");
+
+  if (nameEl) nameEl.textContent = pkg.name;
+  if (descEl) descEl.textContent = "Kohdeasiakas: " + pkg.targetCustomer;
+  if (priceEl) priceEl.textContent = eur(c.recommendedMonthly) + " / kk";
+}
+
+// VAIHE 1: TARKKA TARVEKARTOITUS
+function step1() {
+  applySurveyToPricing();
+  const c = calc();
+  return `<div class="max-w-4xl mx-auto space-y-6">
+  <div class="bg-white rounded-xl p-6 shadow-sm border border-slate-200">
+    <div class="border-b border-slate-100 pb-4 mb-6">
+      <h1 class="text-2xl font-bold">1. Asiakkaan tiedot ja tarkka tarvekartoitus</h1>
+      <p class="text-slate-600 text-sm mt-1">Syötä asiakkaan volyymitiedot. Järjestelmä suosittelee oikeaa pakettia ja laskee monimutkaisuuskertoimet.</p>
+    </div>
+
+    <div class="grid md:grid-cols-2 gap-6">
+      <div>
+        <label class="block text-sm font-semibold text-slate-700 mb-1">Tositemäärä (kpl / kk)</label>
+        <input type="number" min="0" value="${S.survey.invoices}" oninput="S.survey.invoices=this.value; updateSurveyCalculations();" class="w-full rounded-md border border-slate-300 p-2.5 text-sm bg-slate-50 font-semibold text-slate-800">
+        <span class="text-[11px] text-slate-500 mt-1 block">Yli 100 tositteen määrät lisäävät monimutkaisuuslisää dynaamisesti.</span>
+      </div>
+
+      <div>
+        <label class="block text-sm font-semibold text-slate-700 mb-1">Työntekijämäärä (kpl)</label>
+        <input type="number" min="0" value="${S.survey.employees}" oninput="S.survey.employees=this.value; updateSurveyCalculations();" class="w-full rounded-md border border-slate-300 p-2.5 text-sm bg-slate-50 font-semibold text-slate-800">
+        <span class="text-[11px] text-slate-500 mt-1 block">Vaikuttaa palkanlaskennan laskutusmäärään automaattisesti.</span>
+      </div>
+
+      <div>
+        <label class="block text-sm font-semibold text-slate-700 mb-1">Toimipaikkojen / Yhtiöiden määrä</label>
+        <input type="number" min="1" value="${S.survey.locations}" oninput="S.survey.locations=this.value; updateSurveyCalculations();" class="w-full rounded-md border border-slate-300 p-2.5 text-sm bg-slate-50 font-semibold text-slate-800">
+        <span class="text-[11px] text-slate-500 mt-1 block">Lisätoimipaikat lisäävät +40 €/kk per toimipaikka.</span>
+      </div>
+
+      <div>
+        <label class="block text-sm font-semibold text-slate-700 mb-1">Raportointitarve</label>
+        <select onchange="S.survey.reporting=this.value; updateSurveyCalculations();" class="w-full rounded-md border border-slate-300 p-2.5 text-sm bg-slate-50 font-semibold text-slate-800">
+          <option value="Perus" ${S.survey.reporting === "Perus" ? "selected" : ""}>Perusraportointi</option>
+          <option value="Laaja" ${S.survey.reporting === "Laaja" ? "selected" : ""}>Laajempi johdon raportointi (+30 €/kk)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="mt-8 p-4 bg-sky-50 border border-sky-200 rounded-lg">
+      <div class="text-xs uppercase font-bold text-sky-800 tracking-wider">Kartoituksen perusteella automaattisesti valittu pohja</div>
+      <div class="flex items-center justify-between mt-2">
+        <div>
+          <div id="rec-pkg-name" class="text-lg font-bold text-slate-900">${pkgOf(S.pkg).name}</div>
+          <div id="rec-pkg-desc" class="text-xs text-slate-600">Kohdeasiakas: ${pkgOf(S.pkg).targetCustomer}</div>
+        </div>
+        <div class="text-right">
+          <div id="rec-pkg-price" class="text-xl font-extrabold text-[#0284c7]">${eur(c.recommendedMonthly)} / kk</div>
+          <div class="text-[11px] text-slate-500">Kaikki ydin- ja monimutkaisuuslisät mukaan lukien</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mt-6 pt-4 border-t border-slate-100 text-right">
+      <button onclick="go(2)" class="rounded-md bg-[#0284c7] hover:bg-[#0369a1] text-white px-6 py-2.5 text-sm font-semibold">Siirry valitsemaan paketti ja palvelut →</button>
+    </div>
+  </div></div>`;
+}
+
+// VAIHE 2: PAKETTIEN SISÄLLÖN AVAAMINEN & SELEKTIO
+function step2() {
+  return `<div class="grid lg:grid-cols-[1fr_340px] gap-6 items-start"><div>
+  <h1 class="text-2xl font-bold">2. Palvelupaketin valinta ja erittely</h1>
+  <p class="text-slate-600 text-sm mt-1">Valitse sopivin Core-paketti. Pakettien hinnat lasketaan dynaamisesti moduulien summasta.</p>
+  
+  <div class="space-y-4 mt-6">
+    ${DATA.packages.map(p => {
+      const sel = S.pkg === p.id;
+      const baseCost = pkgBasePrice(p.id);
+      return `<div class="bg-white rounded-xl border ${sel ? "border-2 border-[#0284c7] shadow-md" : "border-slate-200"} p-5">
+        <div class="flex items-start justify-between gap-4 border-b border-slate-100 pb-3">
+          <div>
+            <div class="flex items-center gap-2">
+              <h2 class="text-lg font-bold text-slate-900">${p.name}</h2>${sel ? `<span class="bg-sky-100 text-[#0284c7] text-xs font-semibold px-2.5 py-0.5 rounded-full">Valittu suositus</span>` : ""}
+            </div>
+            <p class="text-xs text-slate-600 mt-1">Kohdeasiakas: ${p.targetCustomer}</p>
+          </div>
+          <div class="text-right shrink-0">
+            <div class="text-xl font-bold text-slate-900">${eur(baseCost)} / kk</div>
+            <button onclick="S.pkg='${p.id}'; render();" class="mt-2 text-xs font-semibold rounded px-3 py-1.5 ${sel ? "bg-[#0284c7] text-white" : "border border-slate-300 text-slate-700 hover:bg-slate-50"}">
+              ${sel ? "Aktiivinen" : "Vaihda tähän"}
+            </button>
+          </div>
+        </div>
+
+        <div class="mt-3">
+          <div class="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">Pakettiin sisältyvät ydinmoduulit:</div>
+          <div class="grid sm:grid-cols-2 gap-2">
+            ${p.includedModules.map(mId => {
+              const m = prod(mId);
+              return `<div class="flex items-center justify-between text-xs text-slate-700 bg-slate-50 p-2 rounded border border-slate-100">
+                <span class="font-medium"><span class="text-[#0284c7] font-bold mr-1.5">✓</span>${m.name}</span>
+                <span class="font-semibold text-slate-500">${eur(m.unitPrice)} / kk</span>
+              </div>`;
+            }).join("")}
+          </div>
+        </div>
+      </div>`;
+    }).join("")}
+  </div>
+  </div>${summaryBox()}</div>`;
+}
+
+// VAIHE 3: LISÄPALVELUT & ALENNUKSET
+function step3() {
+  const c = calc();
+  const extras = DATA.products.filter(p => p.category !== "Core");
+  
+  const discAmounts = {
+    "A-01": c.a01_monthly,
+    "A-02": c.a02_monthly + c.a02_onetime,
+    "A-03": c.a03
+  };
+
+  const discNotes = {
+    "A-01": "5 % alennus koko jatkuvasta kuukausimaksusta",
+    "A-02": "10 % alennus asiantuntijatöistä (HR-konsultointi, Käyttöönottoprojekti)",
+    "A-03": "50 € kerta-alennus ensimmäisen kuukauden laskusta"
+  };
+
+  return `<div class="grid lg:grid-cols-[1fr_340px] gap-6 items-start"><div>
+  <h1 class="text-2xl font-bold">3. Erilliset lisäpalvelut ja alennukset</h1>
+  <p class="text-slate-600 text-sm mt-1">Lisää kiinteän ydinpalvelun päälle täydentäviä palveluita ja alennuksia.</p>
+  
+  <section class="bg-white rounded-xl border border-slate-200 shadow-sm p-5 mt-6">
+    <h2 class="font-semibold text-base mb-3">Erilliset lisäpalvelut</h2>
+    ${extras.map(p => {
+      const on = !!S.extras[p.id], hasQty = p.billingUnit !== "kk";
+      const q = on ? S.extras[p.id].qty : 1;
+      return `<div class="border border-slate-200 rounded-lg p-4 mb-3">
+        <label class="flex items-start justify-between gap-3 cursor-pointer">
+          <span class="flex items-start gap-3"><input type="checkbox" class="mt-1 w-4 h-4 accent-[#0284c7]" ${on ? "checked" : ""} onchange="toggleExtra('${p.id}')">
+          <span><span class="block text-sm font-semibold">${p.name}</span><span class="block text-xs text-slate-500">${p.category} •${p.billingType}</span></span></span>
+          <span class="text-sm font-semibold">${eur(p.unitPrice)} / ${p.billingUnit}</span></label>${on && hasQty ? `<div class="mt-3 flex items-center gap-4 bg-slate-50 p-2 rounded-md"><label class="text-xs font-semibold text-slate-600">Määrä (${p.billingUnit}): 
+          <input type="number" min="1" value="${q}" oninput="setQty('${p.id}',this.value)" class="ml-2 w-20 rounded border border-slate-300 p-1 text-sm font-normal"></label>
+          <span class="text-xs text-slate-600">Yhteensä: <b>${eur(p.unitPrice * q)}</b></span></div>` : ""}
+      </div>`;
+    }).join("")}
+  </section>
+
+  <section class="bg-white rounded-xl border border-slate-200 shadow-sm p-5 mt-5">
+    <h2 class="font-semibold text-base mb-3">Sovellettavat alennukset ja kampanjat</h2>
+    ${DATA.discounts.map(d => {
+      const on = !!S.disc[d.id];
+      const amt = discAmounts[d.id] || 0;
+      const noEffect = on && d.id === "A-02" && amt === 0;
+      return `<label class="flex items-center justify-between bg-slate-50 rounded-md p-3 mb-2 cursor-pointer border border-slate-100 hover:bg-slate-100/80">
+        <span class="flex items-center gap-3"><input type="checkbox" class="w-4 h-4 accent-[#0284c7]" ${on ? "checked" : ""} onchange="S.disc['${d.id}'] = !S.disc['${d.id}']; render();">
+        <span><span class="block text-sm font-semibold">${d.name}</span><span class="block text-xs text-slate-500">${discNotes[d.id]}</span>${noEffect ? '<span class="block text-xs text-amber-700 mt-0.5">Ei vaikutusta: valitse lisäpalveluista asiantuntijatyötä (esim. HR-konsultointi).</span>' : ""}</span></span>
+        <span class="text-sm font-bold ${on && amt > 0 ? "text-green-700" : "text-slate-400"}">${on && amt > 0 ? "−" + eur(amt) : "−" + (d.calculationType === "percentage" ? d.value + " %" : eur(d.value))}</span></label>`;
+    }).join("")}
+  </section>
+  </div>${summaryBox()}</div>`;
+}
+
+// VAIHE 4: YHTEENVETO & SUOSITELTU SOPIMUSHINTA
+function step4() {
+  const c = calc();
+  return `<div class="max-w-4xl mx-auto space-y-6">
+  <section class="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+    <h1 class="text-2xl font-bold border-b border-slate-100 pb-3">4. Hinnan yhteenveto ja suositeltu sopimushinta</h1>
+    
+    <div class="mt-6 overflow-x-auto">
+      <table class="w-full text-sm text-left">
+        <thead class="bg-slate-50 text-slate-600 border-b border-slate-200">
+          <tr>
+            <th class="py-2.5 px-3">Palvelukomponentti</th>
+            <th class="py-2.5 px-3">Kategoria</th>
+            <th class="py-2.5 px-3 text-right">Listahinta</th>
+            <th class="py-2.5 px-3 text-right">Alennus</th>
+            <th class="py-2.5 px-3 text-right">Nettohinta</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-100">
+          ${c.lines.map(l => {
+            const discVal = l.disc || 0;
+            return `<tr class="hover:bg-slate-50">
+              <td class="py-2.5 px-3 font-semibold">${l.label}</td>
+              <td class="py-2.5 px-3 text-xs text-slate-500">${l.cat}</td>
+              <td class="py-2.5 px-3 text-right text-slate-600">${eur(l.list)}</td>
+              <td class="py-2.5 px-3 text-right ${discVal > 0 ? "text-green-700 font-medium" : "text-slate-400"}">${discVal > 0 ? "−" + eur(discVal) : "—"}</td>
+              <td class="py-2.5 px-3 text-right font-bold">${eur(l.list - discVal)}</td>
+            </tr>`;
+          }).join("")}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Alennusten erittely osio -->
+    <div class="mt-6 p-4 bg-slate-50 rounded-lg border border-slate-200">
+      <h3 class="text-xs uppercase font-bold text-slate-500 tracking-wider mb-2">Sovelletut alennukset eriteltynä</h3>
+      <div class="space-y-1.5 text-sm">
+        ${c.a02_monthly + c.a02_onetime > 0 ? `<div class="flex justify-between text-green-700"><span>Sopimusasiakasalennus (-10 % asiantuntijatöistä)</span><b>−${eur(c.a02_monthly + c.a02_onetime)}</b></div>` : ""}
+        ${c.a01_monthly > 0 ? `<div class="flex justify-between text-green-700"><span>Keskittäjäalennus (-5 % kuukausimaksusta)</span><b>−${eur(c.a01_monthly)} / kk</b></div>` : ""}
+        ${c.a03 > 0 ? `<div class="flex justify-between text-green-700"><span>Kampanja: Uusi Asiakas</span><b>−${eur(c.a03)} (1. kuukauden laskusta)</b></div>` : ""}
+        ${!(c.a02_monthly + c.a02_onetime > 0 || c.a01_monthly > 0 || c.a03 > 0) ? `<div class="text-xs text-slate-500 italic">Ei valittuja alennuksia.</div>` : ""}
+      </div>
+    </div>
+
+    <div class="mt-6 p-4 rounded-xl bg-sky-50 border border-sky-200 flex flex-wrap items-center justify-between gap-4">
+      <div>
+        <div class="text-xs uppercase font-bold text-sky-800 tracking-wider">Laskennallinen suositushinta</div>
+        <div class="text-3xl font-extrabold text-[#0284c7]">${eur(c.recommendedMonthly)} <span class="text-sm font-normal text-slate-600">/ kk</span></div>
+        ${c.onetime > 0 ? `<div class="text-xs text-slate-600 mt-1">+ Kertamaksut yhteensä: <b>${eur(c.onetime)}</b></div>` : ""}
+      </div>
+
+      <div class="bg-white p-3 rounded-lg border border-sky-200 shadow-sm">
+        <label class="block text-xs font-bold text-slate-700 mb-1">Syötä poikkeava sopimushinta (€/kk)</label>
+        <div class="flex items-center gap-2">
+          <input type="number" value="${S.customPrice !== null ? S.customPrice : ""}" placeholder="${c.recommendedMonthly}" oninput="S.customPrice = this.value ? parseFloat(this.value) : null; updateSum();" class="w-32 rounded border border-slate-300 p-1.5 text-sm">
+          ${S.customPrice !== null ? `<button onclick="S.customPrice=null; render();" class="text-xs text-red-600 underline">Palauta</button>` : ""}
+        </div>
+      </div>
+    </div>
+
+    ${c.warnings.length > 0 ? `<div class="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-xs font-medium">${c.warnings[0]}</div>` : ""}
+  </section>
+  </div>`;
+}
+
+function render() {
+  document.getElementById("app").innerHTML = header() + `<main class="max-w-6xl mx-auto px-5 py-8">${[step1, step2, step3, step4][S.step - 1]()}</main>`;
+}
+function updateSum() {
+  const old = document.getElementById("sum");
+  if (old) old.outerHTML = summaryBox();
+}
+function go(n) { S.step = n; render(); window.scrollTo(0, 0); }
+function toggleExtra(id) {
+  if (S.extras[id]) delete S.extras[id];
+  else S.extras[id] = { qty: 1 };
+  render();
+}
+function setQty(id, v) {
+  S.extras[id].qty = Math.max(1, parseFloat(v) || 1);
+  updateSum();
+}
+
+render();
+</script>
+</body>
+</html>
